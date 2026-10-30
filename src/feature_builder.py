@@ -3,9 +3,12 @@ import numpy as np
 import math
 import nltk
 from nltk.corpus import stopwords
+import pymorphy3
+from functools import lru_cache # для кэширования лемм
 
 nltk.download('stopwords', quiet=True)
-russian_stopwords = set(stopwords.words("russian"))
+russian_stopwords = set(stopwords.words("russian")) - set(['не', 'нет', 'хорошо', 'есть'])
+morph = pymorphy3.MorphAnalyzer()
 
 def Create_join_tables(df_bookings, df_reviews):
     df_bookings['booking_date'] = pd.to_datetime(df_bookings['booking_date'])
@@ -17,6 +20,7 @@ def Create_join_tables(df_bookings, df_reviews):
     df_reviews['review_date'] = pd.to_datetime(df_reviews['review_date'])
     df_bookings = df_bookings.drop_duplicates(subset=['booking_id', 'booking_date', 'booking_value', 'booking_status'],
                                               keep='first', ignore_index=True)
+    df_bookings = df_bookings[df_bookings['booking_value'] > 0].copy().reset_index(drop=True)
 
     reviews_by_customer = df_reviews.groupby(['customer_id', 'review_date'], as_index=False).agg( 
         stay_rating=('stay_rating', 'mean'),
@@ -61,23 +65,30 @@ def Create_join_tables(df_bookings, df_reviews):
     df['checkin_month_cs'] = np.cos(df['checkin_month'] * math.pi / 6)
 
     df['total_nights'] = df['weekend_nights'] + df['weekday_nights']
+    df['weekend_share'] = df['weekend_nights'] / df['total_nights']
+    df['weekday_share'] = df['weekday_nights'] / df['total_nights']
     df['price_per_night'] = df['booking_value'] / df['total_nights']
     df['total_guests'] = df['adult_count'] + df['child_count']
+    df['price_per_guest'] = df['booking_value'] / df['total_guests']
 
     for col in ['client_previous_review', 'previous_review']:
-        df[col] = df[col].str.replace(r'\W', ' ', regex=True)
-        df[col] = df[col].str.strip()
-        df[col] = df[col].str.lower()
-        df['tokens'] = df[col].str.split()
-        df[col] = df['tokens'].apply(remove_stopwords)
+        s = df[col].str.replace(r'\W+', ' ', regex=True).str.strip().str.lower()
+        unique_texts = s.unique()
+
+        processed = { text:preprocess_text(text.split()) for text in unique_texts}
+        df[col] = s.map(processed)
 
     result = df.drop(columns = ['booking_id', 'customer_id', 'client_previous_review_date',
-                                'last_review_date', 'booking_month', 'checkin_month', 'tokens'])
+                                'last_review_date', 'booking_month', 'checkin_month'])
     for col in ['sales_channel', 'meal_plan', 'room_type']:
         result[col] = result[col].astype('category')
 
     return result
 
-def remove_stopwords(text_tokens):
-    filtered_sentence = [word for word in text_tokens if word not in russian_stopwords]
-    return " ".join(filtered_sentence)
+@lru_cache(maxsize=100_000)
+def lemmatize_word(word):
+    return morph.parse(word)[0].normal_form
+
+
+def preprocess_text(words_list):
+    return " ".join(lemmatize_word(word) for word in words_list if word not in russian_stopwords)
